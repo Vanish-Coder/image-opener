@@ -21,6 +21,9 @@ fileInput.addEventListener('change', function() {
       preview.style.display = 'block';
     };
     reader.readAsDataURL(file);
+  } else {
+    preview.src = '';
+    preview.style.display = 'none';
   }
 });
 </script>
