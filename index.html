@@ -19,6 +19,38 @@
     object-fit: contain;
     display: block;
   }
+  #details {
+    display: none;
+    margin-top: 12px;
+    font-family: monospace;
+    font-size: 13px;
+    background: #f4f4f4;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 12px;
+    max-width: 500px;
+    white-space: pre-wrap;
+  }
+  #details table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  #details td {
+    padding: 2px 8px;
+    vertical-align: top;
+  }
+  #details td:first-child {
+    color: #555;
+    white-space: nowrap;
+  }
+  .swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 1px solid #999;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
 </style>
 </head>
 <body>
@@ -27,11 +59,167 @@
 <div id="previewWrapper">
   <img id="preview" src="">
 </div>
+<div id="details"></div>
+
+<canvas id="hiddenCanvas" style="display:none;"></canvas>
 
 <script>
 const fileInput = document.getElementById('fileInput');
 const preview = document.getElementById('preview');
 const previewWrapper = document.getElementById('previewWrapper');
+const details = document.getElementById('details');
+const hiddenCanvas = document.getElementById('hiddenCanvas');
+
+let cvReady = false;
+function onOpenCvReady() {
+  cvReady = true;
+}
+if (window.cv) {
+  cv['onRuntimeInitialized'] = onOpenCvReady;
+} else {
+  const waitCv = setInterval(() => {
+    if (window.cv && cv['onRuntimeInitialized'] !== undefined) {
+      cv['onRuntimeInitialized'] = onOpenCvReady;
+      clearInterval(waitCv);
+    } else if (window.cv) {
+      cv['onRuntimeInitialized'] = onOpenCvReady;
+      clearInterval(waitCv);
+    }
+  }, 100);
+}
+
+function fmt(n, d = 2) {
+  return Number(n).toFixed(d);
+}
+
+function analyzeImage(img, file) {
+  details.style.display = 'none';
+  details.innerHTML = '';
+
+  hiddenCanvas.width = img.naturalWidth;
+  hiddenCanvas.height = img.naturalHeight;
+  const ctx = hiddenCanvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+
+  let rSum = 0, gSum = 0, bSum = 0;
+  let rMin = 255, gMin = 255, bMin = 255;
+  let rMax = 0, gMax = 0, bMax = 0;
+  let lumSum = 0, lumSumSq = 0;
+  let transparentCount = 0;
+  const histBins = 16;
+  const lumHist = new Array(histBins).fill(0);
+  const pixelCount = w * h;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+    rSum += r; gSum += g; bSum += b;
+    if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+    if (g < gMin) gMin = g; if (g > gMax) gMax = g;
+    if (b < bMin) bMin = b; if (b > bMax) bMax = b;
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    lumSum += lum;
+    lumSumSq += lum * lum;
+    const bin = Math.min(histBins - 1, Math.floor(lum / (256 / histBins)));
+    lumHist[bin]++;
+    if (a < 255) transparentCount++;
+  }
+
+  const avgR = rSum / pixelCount;
+  const avgG = gSum / pixelCount;
+  const avgB = bSum / pixelCount;
+  const avgLum = lumSum / pixelCount;
+  const variance = (lumSumSq / pixelCount) - (avgLum * avgLum);
+  const stdDev = Math.sqrt(Math.max(0, variance));
+  const aspectRatio = w / h;
+  const megapixels = (w * h) / 1e6;
+
+  function toHex(n) {
+    return Math.round(n).toString(16).padStart(2, '0');
+  }
+  const avgHex = '#' + toHex(avgR) + toHex(avgG) + toHex(avgB);
+
+  let edgeInfo = 'unavailable';
+  let contourCount = null;
+  let dominantOrientation = 'n/a';
+
+  if (window.cv && cvReady) {
+    try {
+      const src = cv.imread(hiddenCanvas);
+      const gray = new cv.Mat();
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      const edges = new cv.Mat();
+      cv.Canny(gray, edges, 50, 150);
+
+      let edgePixelCount = 0;
+      for (let i = 0; i < edges.data.length; i++) {
+        if (edges.data[i] !== 0) edgePixelCount++;
+      }
+      const edgeDensity = (edgePixelCount / (w * h)) * 100;
+      edgeInfo = fmt(edgeDensity, 2) + '% of pixels';
+
+      const contours = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+      cv.findContours(edges, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      contourCount = contours.size();
+
+      const sobelX = new cv.Mat();
+      const sobelY = new cv.Mat();
+      cv.Sobel(gray, sobelX, cv.CV_32F, 1, 0);
+      cv.Sobel(gray, sobelY, cv.CV_32F, 0, 1);
+      let sumX = 0, sumY = 0;
+      for (let i = 0; i < sobelX.data32F.length; i++) {
+        sumX += Math.abs(sobelX.data32F[i]);
+        sumY += Math.abs(sobelY.data32F[i]);
+      }
+      dominantOrientation = sumX > sumY * 1.1 ? 'vertical edges dominant' :
+                            sumY > sumX * 1.1 ? 'horizontal edges dominant' : 'balanced';
+
+      src.delete(); gray.delete(); edges.delete();
+      contours.delete(); hierarchy.delete();
+      sobelX.delete(); sobelY.delete();
+    } catch (err) {
+      edgeInfo = 'error: ' + err.message;
+    }
+  }
+
+  const histBar = lumHist.map(v => {
+    const pct = v / pixelCount;
+    const blocks = Math.round(pct * 40);
+    return '\u2588'.repeat(blocks) || '\u00b7';
+  }).join('\n');
+
+  const fileSizeKB = file ? (file.size / 1024) : null;
+
+  let html = '<table>';
+  html += `<tr><td>File name</td><td>${file ? file.name : 'n/a'}</td></tr>`;
+  html += `<tr><td>File size</td><td>${fileSizeKB !== null ? fmt(fileSizeKB, 1) + ' KB' : 'n/a'}</td></tr>`;
+  html += `<tr><td>File type</td><td>${file ? file.type : 'n/a'}</td></tr>`;
+  html += `<tr><td>Dimensions</td><td>${w} x ${h} px</td></tr>`;
+  html += `<tr><td>Megapixels</td><td>${fmt(megapixels, 2)} MP</td></tr>`;
+  html += `<tr><td>Aspect ratio</td><td>${fmt(aspectRatio, 3)} (${w}:${h})</td></tr>`;
+  html += `<tr><td>Has transparency</td><td>${transparentCount > 0 ? 'yes (' + fmt((transparentCount / pixelCount) * 100, 2) + '% of pixels)' : 'no'}</td></tr>`;
+  html += `<tr><td>Average color</td><td><span class="swatch" style="background:${avgHex}"></span>${avgHex} (R ${fmt(avgR, 1)}, G ${fmt(avgG, 1)}, B ${fmt(avgB, 1)})</td></tr>`;
+  html += `<tr><td>Channel range R</td><td>${rMin} - ${rMax}</td></tr>`;
+  html += `<tr><td>Channel range G</td><td>${gMin} - ${gMax}</td></tr>`;
+  html += `<tr><td>Channel range B</td><td>${bMin} - ${bMax}</td></tr>`;
+  html += `<tr><td>Avg luminance</td><td>${fmt(avgLum, 2)} / 255</td></tr>`;
+  html += `<tr><td>Luminance std dev</td><td>${fmt(stdDev, 2)}</td></tr>`;
+  html += `<tr><td>Contrast estimate</td><td>${stdDev > 60 ? 'high' : stdDev > 30 ? 'medium' : 'low'}</td></tr>`;
+  html += `<tr><td>Brightness</td><td>${avgLum > 170 ? 'bright' : avgLum > 85 ? 'midtone' : 'dark'}</td></tr>`;
+  html += `<tr><td>Edge density</td><td>${edgeInfo}</td></tr>`;
+  html += `<tr><td>Contour count</td><td>${contourCount !== null ? contourCount : 'n/a'}</td></tr>`;
+  html += `<tr><td>Orientation bias</td><td>${dominantOrientation}</td></tr>`;
+  html += `<tr><td>Luminance histogram</td><td><pre style="margin:0">${histBar}</pre></td></tr>`;
+  html += '</table>';
+
+  details.innerHTML = html;
+  details.style.display = 'block';
+}
 
 fileInput.addEventListener('change', function() {
   const file = fileInput.files[0];
@@ -40,11 +228,15 @@ fileInput.addEventListener('change', function() {
     reader.onload = function(e) {
       preview.src = e.target.result;
       previewWrapper.style.display = 'block';
+      preview.onload = function() {
+        analyzeImage(preview, file);
+      };
     };
     reader.readAsDataURL(file);
   } else {
     preview.src = '';
     previewWrapper.style.display = 'none';
+    details.style.display = 'none';
   }
 });
 </script>
