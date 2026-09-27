@@ -3,8 +3,26 @@
 <head>
 <title>Image Upload</title>
 <style>
-  #previewWrapper {
+  #controls {
     display: none;
+    align-items: center;
+    gap: 16px;
+    margin: 10px 0;
+    font-family: sans-serif;
+    font-size: 14px;
+  }
+  #controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #sensitivity {
+    width: 160px;
+  }
+  #imageArea {
+    display: none;
+  }
+  #imageArea.stacked #previewWrapper {
     position: relative;
     resize: both;
     overflow: hidden;
@@ -12,6 +30,33 @@
     width: 300px;
     height: 300px;
     max-width: 100%;
+  }
+  #imageArea.stacked #edgeCanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  #imageArea.side-by-side {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  #imageArea.side-by-side #previewWrapper {
+    position: relative;
+    width: 300px;
+    height: 300px;
+    border: 1px dashed #999;
+    flex-shrink: 0;
+  }
+  #imageArea.side-by-side #edgeCanvas {
+    position: static;
+    width: 300px;
+    height: 300px;
+    border: 1px dashed #999;
+    object-fit: contain;
   }
   #preview {
     width: 100%;
@@ -55,10 +100,25 @@
 </head>
 <body>
 <input type="file" id="fileInput" accept="image/*">
-<br><br>
-<div id="previewWrapper">
-  <img id="preview" src="">
+<br>
+
+<div id="controls">
+  <label><input type="checkbox" id="sideToggle"> Side-by-side view</label>
+  <label>
+    Sensitivity:
+    <input type="range" id="sensitivity" min="10" max="200" value="80">
+    <span id="sensitivityVal">80</span>
+  </label>
 </div>
+<div id="edgeStatus" style="display:none; font-family:sans-serif; font-size:13px; color:#b00; margin:6px 0;"></div>
+
+<div id="imageArea" class="stacked">
+  <div id="previewWrapper">
+    <img id="preview" src="">
+  </div>
+  <canvas id="edgeCanvas"></canvas>
+</div>
+
 <div id="details"></div>
 
 <canvas id="hiddenCanvas" style="display:none;"></canvas>
@@ -69,10 +129,21 @@ const preview = document.getElementById('preview');
 const previewWrapper = document.getElementById('previewWrapper');
 const details = document.getElementById('details');
 const hiddenCanvas = document.getElementById('hiddenCanvas');
+const controls = document.getElementById('controls');
+const imageArea = document.getElementById('imageArea');
+const edgeCanvas = document.getElementById('edgeCanvas');
+const sideToggle = document.getElementById('sideToggle');
+const sensitivity = document.getElementById('sensitivity');
+const sensitivityVal = document.getElementById('sensitivityVal');
+const edgeStatus = document.getElementById('edgeStatus');
 
 let cvReady = false;
+let currentImg = null;
+
 function onOpenCvReady() {
   cvReady = true;
+  console.log('OpenCV ready');
+  if (currentImg) drawShapeOutlines();
 }
 if (window.cv) {
   cv['onRuntimeInitialized'] = onOpenCvReady;
@@ -91,6 +162,144 @@ if (window.cv) {
 function fmt(n, d = 2) {
   return Number(n).toFixed(d);
 }
+
+// --- Shape outline detection (all edge/contour work done via OpenCV) ---
+function drawShapeOutlines() {
+  if (!currentImg) return;
+  if (!window.cv || !cvReady) {
+    edgeStatus.style.display = 'block';
+    edgeStatus.style.color = '#a56b00';
+    edgeStatus.textContent = 'OpenCV is still loading — outlines will appear once it finishes.';
+    return;
+  }
+
+  edgeStatus.style.display = 'none';
+  edgeStatus.textContent = '';
+
+  const w = currentImg.naturalWidth;
+  const h = currentImg.naturalHeight;
+
+  // Size the edge canvas to match the image's pixel dimensions so drawing
+  // coordinates line up 1:1; CSS handles the display scaling.
+  edgeCanvas.width = w;
+  edgeCanvas.height = h;
+
+  hiddenCanvas.width = w;
+  hiddenCanvas.height = h;
+  const srcCtx = hiddenCanvas.getContext('2d');
+  srcCtx.drawImage(currentImg, 0, 0);
+
+  const highThresh = Number(sensitivity.value);
+  const lowThresh = highThresh / 2;
+
+  // Minimum contour area to keep, scaled to image size, so tiny noise
+  // specks don't get traced as "shapes".
+  const minArea = (w * h) * 0.0005;
+
+  const isSideBySide = imageArea.classList.contains('side-by-side');
+
+  let src, gray, edges, contours, hierarchy;
+  try {
+    // 1. Load the frame into an OpenCV Mat and convert to grayscale —
+    //    same call already used successfully for the edge-density stat.
+    src = cv.imread(hiddenCanvas);
+    gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+    // 2. OpenCV Canny edge detection (same signature already working
+    //    for the edge-density stat above, just with slider thresholds).
+    edges = new cv.Mat();
+    cv.Canny(gray, edges, lowThresh, highThresh);
+
+    // 3. OpenCV contour extraction — outer boundaries only, so a
+    //    building/car/stroller traces as one shape rather than every
+    //    internal edge.
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const ectx = edgeCanvas.getContext('2d');
+
+    if (isSideBySide) {
+      // Render OpenCV's own grayscale conversion as the right-hand
+      // panel's image (instead of a placeholder), via cv.imshow.
+      cv.imshow(edgeCanvas, gray);
+    } else {
+      // Stacked mode: transparent canvas so only the outline shows,
+      // layered directly on top of the photo underneath.
+      ectx.clearRect(0, 0, w, h);
+    }
+
+    ectx.strokeStyle = '#2979ff';
+    ectx.lineWidth = Math.max(2, Math.round(Math.min(w, h) / 250));
+
+    let shapeCount = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const cnt = contours.get(i);
+      const area = cv.contourArea(cnt);
+      if (area >= minArea) {
+        shapeCount++;
+        const pts = cnt.data32S;
+        ectx.beginPath();
+        for (let p = 0; p < pts.length; p += 2) {
+          const x = pts[p], y = pts[p + 1];
+          if (p === 0) ectx.moveTo(x, y);
+          else ectx.lineTo(x, y);
+        }
+        ectx.closePath();
+        ectx.stroke();
+      }
+      cnt.delete();
+    }
+
+    updateShapeCount(shapeCount);
+
+    if (shapeCount === 0) {
+      edgeStatus.style.display = 'block';
+      edgeStatus.style.color = '#a56b00';
+      edgeStatus.textContent = 'No shapes met the size threshold — try lowering the sensitivity slider.';
+    }
+  } catch (err) {
+    edgeStatus.style.display = 'block';
+    edgeStatus.style.color = '#b00';
+    edgeStatus.textContent = 'Edge detection error: ' + err.message;
+    console.error('Shape outline error:', err);
+  } finally {
+    [src, gray, edges, contours, hierarchy].forEach(m => {
+      if (m && typeof m.delete === 'function') m.delete();
+    });
+  }
+}
+
+function updateShapeCount(count) {
+  const existing = document.getElementById('shapeCountRow');
+  if (existing) existing.remove();
+  if (details.style.display !== 'none') {
+    const table = details.querySelector('table');
+    if (table) {
+      const row = document.createElement('tr');
+      row.id = 'shapeCountRow';
+      row.innerHTML = `<td>Shapes traced</td><td>${count} (sensitivity ${sensitivity.value})</td>`;
+      table.appendChild(row);
+    }
+  }
+}
+
+sensitivity.addEventListener('input', () => {
+  sensitivityVal.textContent = sensitivity.value;
+  drawShapeOutlines();
+});
+
+sideToggle.addEventListener('change', () => {
+  if (sideToggle.checked) {
+    imageArea.classList.remove('stacked');
+    imageArea.classList.add('side-by-side');
+  } else {
+    imageArea.classList.remove('side-by-side');
+    imageArea.classList.add('stacked');
+  }
+  drawShapeOutlines();
+});
 
 function analyzeImage(img, file) {
   details.style.display = 'none';
@@ -219,6 +428,8 @@ function analyzeImage(img, file) {
 
   details.innerHTML = html;
   details.style.display = 'block';
+
+  drawShapeOutlines();
 }
 
 fileInput.addEventListener('change', function() {
@@ -227,15 +438,19 @@ fileInput.addEventListener('change', function() {
     const reader = new FileReader();
     reader.onload = function(e) {
       preview.src = e.target.result;
-      previewWrapper.style.display = 'block';
+      controls.style.display = 'flex';
+      imageArea.style.display = imageArea.classList.contains('side-by-side') ? 'flex' : 'block';
       preview.onload = function() {
+        currentImg = preview;
         analyzeImage(preview, file);
       };
     };
     reader.readAsDataURL(file);
   } else {
     preview.src = '';
-    previewWrapper.style.display = 'none';
+    currentImg = null;
+    controls.style.display = 'none';
+    imageArea.style.display = 'none';
     details.style.display = 'none';
   }
 });
