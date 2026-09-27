@@ -32,7 +32,9 @@
   }
   #imageArea.side-by-side #previewWrapper {
     display: flex;
-    width: 620px;
+    width: auto;
+    height: auto;
+    border: none;
     gap: 16px;
   }
   #preview {
@@ -49,11 +51,15 @@
     height: 100%;
     pointer-events: none;
   }
+  /* Side-by-side: no fixed box, so each panel shows at its natural
+     size (capped so it fits on screen) instead of being squeezed. */
   #imageArea.side-by-side #preview,
   #imageArea.side-by-side #edgeCanvas {
     position: static;
-    width: 300px;
-    height: 300px;
+    width: auto;
+    height: auto;
+    max-width: 45vw;
+    max-height: 70vh;
     border: 1px solid #999;
   }
   #details {
@@ -228,7 +234,7 @@ function drawShapeOutlines() {
 
     const ectx = edgeCanvas.getContext('2d');
     if (isSideBySide) {
-      cv.imshow(edgeCanvas, gray); // show OpenCV's grayscale frame as the right panel
+      cv.imshow(edgeCanvas, src); // show OpenCV's color frame as the right panel
     } else {
       ectx.clearRect(0, 0, w, h); // transparent so only the outline shows over the photo
     }
