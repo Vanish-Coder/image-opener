@@ -145,19 +145,38 @@ function onOpenCvReady() {
   console.log('OpenCV ready');
   if (currentImg) drawShapeOutlines();
 }
-if (window.cv) {
-  cv['onRuntimeInitialized'] = onOpenCvReady;
-} else {
-  const waitCv = setInterval(() => {
-    if (window.cv && cv['onRuntimeInitialized'] !== undefined) {
-      cv['onRuntimeInitialized'] = onOpenCvReady;
-      clearInterval(waitCv);
-    } else if (window.cv) {
-      cv['onRuntimeInitialized'] = onOpenCvReady;
-      clearInterval(waitCv);
-    }
-  }, 100);
+
+// Newer opencv.js builds export `cv` as a Promise that resolves to the
+// real module (no onRuntimeInitialized callback fires). Older builds
+// export `cv` as the module object directly and call
+// cv.onRuntimeInitialized once WASM finishes loading. Support both,
+// and poll until the `cv` global exists at all in case this script
+// runs before opencv.js has parsed.
+function initCv() {
+  if (!window.cv) {
+    setTimeout(initCv, 100);
+    return;
+  }
+  if (typeof window.cv.then === 'function') {
+    // Promise-style build.
+    window.cv.then((resolvedCv) => {
+      window.cv = resolvedCv;
+      onOpenCvReady();
+    }).catch((err) => {
+      edgeStatus.style.display = 'block';
+      edgeStatus.style.color = '#b00';
+      edgeStatus.textContent = 'OpenCV failed to initialize: ' + err.message;
+    });
+  } else if (typeof window.cv.getBuildInformation === 'function') {
+    // Already fully initialized (rare, but possible if this script
+    // runs after the runtime already finished).
+    onOpenCvReady();
+  } else {
+    // Callback-style build.
+    window.cv['onRuntimeInitialized'] = onOpenCvReady;
+  }
 }
+initCv();
 
 function fmt(n, d = 2) {
   return Number(n).toFixed(d);
