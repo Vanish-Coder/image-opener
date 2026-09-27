@@ -146,37 +146,35 @@ function onOpenCvReady() {
   if (currentImg) drawShapeOutlines();
 }
 
-// Newer opencv.js builds export `cv` as a Promise that resolves to the
-// real module (no onRuntimeInitialized callback fires). Older builds
-// export `cv` as the module object directly and call
-// cv.onRuntimeInitialized once WASM finishes loading. Support both,
-// and poll until the `cv` global exists at all in case this script
-// runs before opencv.js has parsed.
-function initCv() {
-  if (!window.cv) {
-    setTimeout(initCv, 100);
-    return;
-  }
-  if (typeof window.cv.then === 'function') {
-    // Promise-style build.
+// This build of opencv.js finishes WASM init synchronously within the
+// script's own execution, so `cv` is already fully populated (HEAP
+// arrays, getBuildInformation, etc.) by the time the <script> tag's
+// load event fires — there's no separate async gap to wait out via
+// cv.onRuntimeInitialized. Hook the script's onload instead, per
+// OpenCV's own tutorial pattern, with the callback-style path kept as
+// a fallback for older builds that DO still need it.
+function onOpenCvScriptLoad() {
+  if (window.cv && typeof window.cv.getBuildInformation === 'function') {
+    onOpenCvReady();
+  } else if (window.cv && typeof window.cv.then === 'function') {
     window.cv.then((resolvedCv) => {
       window.cv = resolvedCv;
       onOpenCvReady();
-    }).catch((err) => {
-      edgeStatus.style.display = 'block';
-      edgeStatus.style.color = '#b00';
-      edgeStatus.textContent = 'OpenCV failed to initialize: ' + err.message;
     });
-  } else if (typeof window.cv.getBuildInformation === 'function') {
-    // Already fully initialized (rare, but possible if this script
-    // runs after the runtime already finished).
-    onOpenCvReady();
-  } else {
-    // Callback-style build.
+  } else if (window.cv) {
     window.cv['onRuntimeInitialized'] = onOpenCvReady;
+  } else {
+    // Script tag fired onload but the global isn't there yet in some
+    // edge case — give it a brief moment and recheck.
+    setTimeout(onOpenCvScriptLoad, 50);
   }
 }
-initCv();
+
+// Safety net in case the script somehow finished before this point,
+// or onload doesn't fire for a cached/inline case in some browsers.
+if (window.cv && typeof window.cv.getBuildInformation === 'function') {
+  onOpenCvScriptLoad();
+}
 
 function fmt(n, d = 2) {
   return Number(n).toFixed(d);
@@ -474,6 +472,6 @@ fileInput.addEventListener('change', function() {
   }
 });
 </script>
-<script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+<script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvScriptLoad()" type="text/javascript"></script>
 </body>
 </html>
