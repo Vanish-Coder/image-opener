@@ -172,7 +172,13 @@ function fmt(n, d = 2) {
   return Number(n).toFixed(d);
 }
 
-// --- Shape outline detection (all edge/contour work done via OpenCV) ---
+// Process detection at a capped resolution. Running Canny on a full
+// multi-megapixel photo is slow and traces every bit of texture as an
+// "edge"; shrinking first acts like a blur and keeps only real shape
+// boundaries, and it's what makes the slider responsive.
+const MAX_PROCESS_DIM = 700;
+const procCanvas = document.createElement('canvas');
+
 function drawShapeOutlines() {
   if (!currentImg) return;
   if (!window.cv || !cvReady) {
@@ -181,79 +187,65 @@ function drawShapeOutlines() {
     edgeStatus.textContent = 'OpenCV is still loading — outlines will appear once it finishes.';
     return;
   }
-
   edgeStatus.style.display = 'none';
-  edgeStatus.textContent = '';
 
-  const w = currentImg.naturalWidth;
-  const h = currentImg.naturalHeight;
+  const fullW = currentImg.naturalWidth;
+  const fullH = currentImg.naturalHeight;
+  const scale = Math.min(1, MAX_PROCESS_DIM / Math.max(fullW, fullH));
+  const w = Math.round(fullW * scale);
+  const h = Math.round(fullH * scale);
 
-  // Size the edge canvas to match the image's pixel dimensions so drawing
-  // coordinates line up 1:1; CSS handles the display scaling.
+  procCanvas.width = w;
+  procCanvas.height = h;
+  procCanvas.getContext('2d').drawImage(currentImg, 0, 0, w, h);
+
   edgeCanvas.width = w;
   edgeCanvas.height = h;
 
-  hiddenCanvas.width = w;
-  hiddenCanvas.height = h;
-  const srcCtx = hiddenCanvas.getContext('2d');
-  srcCtx.drawImage(currentImg, 0, 0);
-
   const highThresh = Number(sensitivity.value);
   const lowThresh = highThresh / 2;
-
-  // Minimum contour area to keep, scaled to image size, so tiny noise
-  // specks don't get traced as "shapes".
-  const minArea = (w * h) * 0.0005;
-
+  const minArea = (w * h) * 0.001; // drop tiny noise specks
   const isSideBySide = imageArea.classList.contains('side-by-side');
 
-  let src, gray, edges, contours, hierarchy;
+  let src, gray, blurred, edges, contours, hierarchy;
   try {
-    // 1. Load the frame into an OpenCV Mat and convert to grayscale —
-    //    same call already used successfully for the edge-density stat.
-    src = cv.imread(hiddenCanvas);
+    src = cv.imread(procCanvas);
     gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // 2. OpenCV Canny edge detection (same signature already working
-    //    for the edge-density stat above, just with slider thresholds).
-    edges = new cv.Mat();
-    cv.Canny(gray, edges, lowThresh, highThresh);
+    // Blur so Canny traces shape outlines, not texture/noise.
+    blurred = new cv.Mat();
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
 
-    // 3. OpenCV contour extraction — outer boundaries only, so a
-    //    building/car/stroller traces as one shape rather than every
-    //    internal edge.
+    edges = new cv.Mat();
+    cv.Canny(blurred, edges, lowThresh, highThresh);
+
+    // Outer boundaries only, so a building/car/stroller traces as one
+    // shape rather than every internal edge.
     contours = new cv.MatVector();
     hierarchy = new cv.Mat();
     cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
     const ectx = edgeCanvas.getContext('2d');
-
     if (isSideBySide) {
-      // Render OpenCV's own grayscale conversion as the right-hand
-      // panel's image (instead of a placeholder), via cv.imshow.
-      cv.imshow(edgeCanvas, gray);
+      cv.imshow(edgeCanvas, gray); // show OpenCV's grayscale frame as the right panel
     } else {
-      // Stacked mode: transparent canvas so only the outline shows,
-      // layered directly on top of the photo underneath.
-      ectx.clearRect(0, 0, w, h);
+      ectx.clearRect(0, 0, w, h); // transparent so only the outline shows over the photo
     }
 
     ectx.strokeStyle = '#2979ff';
-    ectx.lineWidth = Math.max(2, Math.round(Math.min(w, h) / 250));
+    ectx.lineWidth = 2;
 
     let shapeCount = 0;
     for (let i = 0; i < contours.size(); i++) {
       const cnt = contours.get(i);
-      const area = cv.contourArea(cnt);
-      if (area >= minArea) {
+      if (cv.contourArea(cnt) >= minArea) {
         shapeCount++;
         const pts = cnt.data32S;
         ectx.beginPath();
         for (let p = 0; p < pts.length; p += 2) {
-          const x = pts[p], y = pts[p + 1];
-          if (p === 0) ectx.moveTo(x, y);
-          else ectx.lineTo(x, y);
+          if (p === 0) ectx.moveTo(pts[p], pts[p + 1]);
+          else ectx.lineTo(pts[p], pts[p + 1]);
         }
         ectx.closePath();
         ectx.stroke();
@@ -262,7 +254,6 @@ function drawShapeOutlines() {
     }
 
     updateShapeCount(shapeCount);
-
     if (shapeCount === 0) {
       edgeStatus.style.display = 'block';
       edgeStatus.style.color = '#a56b00';
@@ -272,9 +263,8 @@ function drawShapeOutlines() {
     edgeStatus.style.display = 'block';
     edgeStatus.style.color = '#b00';
     edgeStatus.textContent = 'Edge detection error: ' + err.message;
-    console.error('Shape outline error:', err);
   } finally {
-    [src, gray, edges, contours, hierarchy].forEach(m => {
+    [src, gray, blurred, edges, contours, hierarchy].forEach(m => {
       if (m && typeof m.delete === 'function') m.delete();
     });
   }
@@ -316,7 +306,7 @@ function analyzeImage(img, file) {
 
   hiddenCanvas.width = img.naturalWidth;
   hiddenCanvas.height = img.naturalHeight;
-  const ctx = hiddenCanvas.getContext('2d');
+  const ctx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0);
 
   const w = img.naturalWidth;
